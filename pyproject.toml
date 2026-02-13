@@ -101,3 +101,11 @@ include = ['tests/**']
 [tool.ty.overrides.rules]
 unresolved-attribute = 'ignore'
 invalid-argument-type = 'ignore'
+
+# The processor uses FSM methods (may_trigger, confirm_payment,
+# mark_as_paid, fail) dynamically bound by the transitions library.
+[[tool.ty.overrides]]
+include = ['src/getpaid_przelewy24/processor.py']
+[tool.ty.overrides.rules]
+unresolved-attribute = 'ignore'
+call-non-callable = 'ignore'
