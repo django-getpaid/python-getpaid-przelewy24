@@ -9,7 +9,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):  # noqa: N807
+def __getattr__(name: str):
     if name == "P24Client":
         from getpaid_przelewy24.client import P24Client
 
