@@ -1,14 +1,18 @@
 """Przelewy24 payment processor."""
 
+import contextlib
+import hmac as hmac_mod
 import logging
 import uuid
 from decimal import Decimal
 from typing import ClassVar
 
+from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.processor import BaseProcessor
 from getpaid_core.types import ChargeResponse
 from getpaid_core.types import PaymentStatusResponse
 from getpaid_core.types import TransactionResult
+from transitions.core import MachineError
 
 from .client import P24Client
 from .types import Currency
@@ -95,10 +99,6 @@ class P24Processor(BaseProcessor):
         'sign'. Computes the expected sign from the notification
         fields + CRC key and compares.
         """
-        import hmac as hmac_mod
-
-        from getpaid_core.exceptions import InvalidCallbackError
-
         client = self._get_client()
         sign_fields = {
             "merchantId": data.get("merchantId"),
@@ -146,10 +146,6 @@ class P24Processor(BaseProcessor):
         The verify step is MANDATORY — without it, P24 treats
         the payment as an advance payment only.
         """
-        import contextlib
-
-        from transitions.core import MachineError
-
         order_id: int = data.get("orderId", 0)
         session_id: str = data.get("sessionId", self.payment.id)
         amount: int = data.get("amount", 0)
