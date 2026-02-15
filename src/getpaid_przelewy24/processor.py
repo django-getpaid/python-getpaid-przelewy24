@@ -100,16 +100,37 @@ class P24Processor(BaseProcessor):
         fields + CRC key and compares.
         """
         client = self._get_client()
+        required_fields = [
+            "merchantId",
+            "posId",
+            "sessionId",
+            "amount",
+            "originAmount",
+            "currency",
+            "orderId",
+            "methodId",
+            "statement",
+        ]
+        missing = [
+            field
+            for field in required_fields
+            if field not in data or data[field] in (None, "")
+        ]
+        if missing:
+            raise InvalidCallbackError(
+                "Missing required callback fields: "
+                + ", ".join(sorted(missing))
+            )
         sign_fields = {
-            "merchantId": data.get("merchantId"),
-            "posId": data.get("posId"),
-            "sessionId": data.get("sessionId"),
-            "amount": data.get("amount"),
-            "originAmount": data.get("originAmount"),
-            "currency": data.get("currency"),
-            "orderId": data.get("orderId"),
-            "methodId": data.get("methodId"),
-            "statement": data.get("statement"),
+            "merchantId": data["merchantId"],
+            "posId": data["posId"],
+            "sessionId": data["sessionId"],
+            "amount": data["amount"],
+            "originAmount": data["originAmount"],
+            "currency": data["currency"],
+            "orderId": data["orderId"],
+            "methodId": data["methodId"],
+            "statement": data["statement"],
         }
         expected_sign = client._calculate_sign(sign_fields)
 
@@ -157,21 +178,12 @@ class P24Processor(BaseProcessor):
         client = self._get_client()
         amount_decimal = P24Client._from_lowest_unit(amount)
 
-        try:
-            await client.verify_transaction(
-                session_id=session_id,
-                order_id=order_id,
-                amount=amount_decimal,
-                currency=currency,
-            )
-        except Exception:
-            logger.exception(
-                "P24 verification failed for payment %s",
-                self.payment.id,
-            )
-            if hasattr(self.payment, "fail"):
-                self.payment.fail()
-            return
+        await client.verify_transaction(
+            session_id=session_id,
+            order_id=order_id,
+            amount=amount_decimal,
+            currency=currency,
+        )
 
         # Verification succeeded — move to paid
         if self.payment.may_trigger("confirm_payment"):

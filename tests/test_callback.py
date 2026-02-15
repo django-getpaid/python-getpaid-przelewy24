@@ -5,6 +5,7 @@ import json
 
 import pytest
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import CommunicationError
 from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.fsm import create_payment_machine
 
@@ -95,6 +96,16 @@ class TestVerifyCallback:
         with pytest.raises(InvalidCallbackError):
             await processor.verify_callback(data=data, headers={})
 
+    async def test_missing_required_field_raises(self):
+        data = _notification_data()
+        del data["statement"]
+        processor = _make_processor()
+        with pytest.raises(
+            InvalidCallbackError,
+            match="Missing required callback fields",
+        ):
+            await processor.verify_callback(data=data, headers={})
+
 
 SANDBOX_URL = "https://sandbox.przelewy24.pl"
 VERIFY_URL = f"{SANDBOX_URL}/api/v1/transaction/verify"
@@ -118,8 +129,10 @@ class TestHandleCallback:
 
         assert payment.status == PaymentStatus.PAID
 
-    async def test_failed_verification_marks_failed(self, respx_mock):
-        """Failed verify_transaction moves payment to FAILED."""
+    async def test_failed_verification_raises_communication_error(
+        self, respx_mock
+    ):
+        """Gateway verification failures should be retriable."""
         respx_mock.put(VERIFY_URL).respond(
             json={"error": "Verification failed"},
             status_code=400,
@@ -129,9 +142,10 @@ class TestHandleCallback:
 
         processor = _make_processor(payment=payment)
         data = _notification_data()
-        await processor.handle_callback(data=data, headers={})
+        with pytest.raises(CommunicationError):
+            await processor.handle_callback(data=data, headers={})
 
-        assert payment.status == PaymentStatus.FAILED
+        assert payment.status == PaymentStatus.PREPARED
 
     async def test_stores_external_id(self, respx_mock):
         """handle_callback stores orderId as external_id."""
