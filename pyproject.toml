@@ -1,6 +1,6 @@
 [project]
 name = 'python-getpaid-przelewy24'
-version = "0.1.1"
+version = "0.1.2"
 description = 'Przelewy24 payment gateway integration for python-getpaid ecosystem.'
 readme = 'README.md'
 license = {text = 'MIT'}

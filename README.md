@@ -40,7 +40,7 @@ The plugin is split into two layers:
 ### Standalone Client
 
 ```python
-import asyncio
+import anyio
 from decimal import Decimal
 from getpaid_przelewy24 import P24Client
 
@@ -70,7 +70,7 @@ async def main():
         redirect_url = client.get_transaction_redirect_url(token)
         print(f"Redirect buyer to: {redirect_url}")
 
-asyncio.run(main())
+anyio.run(main)
 ```
 
 ### With django-getpaid

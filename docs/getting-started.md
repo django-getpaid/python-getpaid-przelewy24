@@ -32,7 +32,7 @@ The `P24Client` is an async HTTP client that wraps the Przelewy24 REST API.
 Use it as an async context manager for connection reuse:
 
 ```python
-import asyncio
+import anyio
 from decimal import Decimal
 from getpaid_przelewy24 import P24Client
 
@@ -64,7 +64,7 @@ async def main():
         redirect_url = client.get_transaction_redirect_url(token)
         print(f"Redirect buyer to: {redirect_url}")
 
-asyncio.run(main())
+anyio.run(main)
 ```
 
 ## Using with django-getpaid
