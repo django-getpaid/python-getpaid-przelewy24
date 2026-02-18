@@ -1,46 +1,81 @@
-# getpaid-przelewy24
+# python-getpaid-przelewy24
 
-[![PyPI](https://img.shields.io/pypi/v/python-getpaid-przelewy24.svg)](https://pypi.org/project/python-getpaid-przelewy24/)
-[![Python Version](https://img.shields.io/pypi/pyversions/python-getpaid-przelewy24)](https://pypi.org/project/python-getpaid-przelewy24/)
-[![License](https://img.shields.io/pypi/l/python-getpaid-przelewy24)](https://github.com/django-getpaid/python-getpaid-przelewy24/blob/main/LICENSE)
+[![PyPI version](https://img.shields.io/pypi/v/python-getpaid-przelewy24.svg)](https://pypi.org/project/python-getpaid-przelewy24/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python versions](https://img.shields.io/pypi/pyversions/python-getpaid-przelewy24.svg)](https://pypi.org/project/python-getpaid-przelewy24/)
 
-[Przelewy24](https://www.przelewy24.pl/) payment gateway plugin for the
-[python-getpaid](https://github.com/django-getpaid) ecosystem. Provides an
-async HTTP client (`P24Client`) and a payment processor (`P24Processor`) that
-integrates with getpaid-core's `BaseProcessor` interface. Authentication uses
-HTTP Basic Auth against the Przelewy24 REST API.
+**Przelewy24 payment processor for the [python-getpaid](https://github.com/django-getpaid/python-getpaid-core) ecosystem.**
 
-## Architecture
+[Przelewy24](https://www.przelewy24.pl/) is a leading Polish payment service provider that supports a wide range of payment methods, including bank transfers (pay-by-link), credit cards, and e-wallets (BLIK, Google Pay, Apple Pay).
 
-The plugin is split into two layers:
+This package provides a clean, async-first integration with the Przelewy24 REST API v1.1, implementing the standard `python-getpaid` processor interface.
 
-- **`P24Client`** — low-level async HTTP client wrapping the Przelewy24 REST
-  API. Uses `httpx.AsyncClient` with HTTP Basic Auth (pos_id / api_key). Can be
-  used standalone or as an async context manager for connection reuse.
-- **`P24Processor`** — high-level payment processor implementing
-  `BaseProcessor`. Orchestrates transaction registration, callback verification,
-  payment confirmation, status polling, and refunds. Integrates with the
-  getpaid-core FSM for state transitions.
+## Features
 
-## Key Features
+- **Direct Payment Flow**: Full implementation of the `register -> redirect -> notification -> verify` flow.
+- **Secure by Default**: Automatic signature verification (SHA-384) for all incoming notifications from Przelewy24.
+- **Async-First**: Built on top of `httpx` for efficient, non-blocking I/O.
+- **Multi-Currency Support**: PLN, EUR, GBP, USD, CZK, BGN, DKK, HUF, NOK, SEK, CHF, RON, HRK.
+- **Sandbox Support**: Easy switching between Sandbox and Production environments.
+- **Payment Status Polling**: Support for the PULL flow to check transaction status via API.
+- **Refunds**: Full support for processing refunds through the Przelewy24 API.
+- **FSM Integration**: Seamlessly integrates with the `python-getpaid-core` finite state machine for robust payment state management.
 
-- **Register transaction** — create a payment session and get a redirect URL
-- **Verify transaction** — mandatory confirmation after P24 callback (without
-  this, P24 treats the payment as advance only)
-- **Refund** — batch refund support via P24 API
-- **Get transaction info** — look up transaction by session ID
-- **Get refund info** — look up refunds by P24 order ID
-- **Get payment methods** — retrieve available payment methods for a language
-- **Test access** — verify API credentials
-- **PUSH and PULL** — callback-based notifications with optional status polling
-- **SHA-384 signatures** — automatic sign calculation and verification
+## Installation
 
-## Quick Usage
+Install the package using `pip`:
 
-### Standalone Client
+```bash
+pip install python-getpaid-przelewy24
+```
+
+Or using `uv`:
+
+```bash
+uv add python-getpaid-przelewy24
+```
+
+## Quick Start
+
+### Configuration
+
+Add `przelewy24` to your `python-getpaid` configuration. For example, in a Django project using `django-getpaid`:
 
 ```python
-import anyio
+GETPAID_BACKEND_SETTINGS = {
+    "przelewy24": {
+        "merchant_id": 12345,
+        "pos_id": 12345,  # Usually the same as merchant_id
+        "api_key": "your_api_key_here",
+        "crc_key": "your_crc_key_here",
+        "sandbox": True,  # Use True for testing, False for production
+        "url_status": "https://your-domain.com/payments/p24/status/{payment_id}/",
+        "url_return": "https://your-domain.com/payments/p24/return/{payment_id}/",
+    }
+}
+```
+
+### Configuration Parameters
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `merchant_id` | `int` | Your Przelewy24 Merchant ID. |
+| `pos_id` | `int` | Your Przelewy24 POS ID (defaults to `merchant_id`). |
+| `api_key` | `str` | REST API Key from the Przelewy24 panel. |
+| `crc_key` | `str` | CRC Key from the Przelewy24 panel (used for signing). |
+| `sandbox` | `bool` | If `True` (default), uses the P24 Sandbox environment. |
+| `url_status` | `str` | Callback URL for asynchronous notifications. Supports `{payment_id}`. |
+| `url_return` | `str` | Return URL after payment completion. Supports `{payment_id}`. |
+| `refund_url_status` | `str` | (Optional) Callback URL for refund status notifications. |
+
+Both `url_status`, `url_return`, and `refund_url_status` can include the `{payment_id}` placeholder, which will be automatically replaced with the actual payment ID.
+
+## Standalone Usage
+
+While designed to work with `python-getpaid` framework wrappers, you can also use the `P24Client` directly:
+
+```python
+import asyncio
 from decimal import Decimal
 from getpaid_przelewy24 import P24Client
 
@@ -52,10 +87,6 @@ async def main():
         crc_key="your-crc-key",
         sandbox=True,
     ) as client:
-        # Test connection
-        ok = await client.test_access()
-        print(f"Connection OK: {ok}")
-
         # Register a transaction
         response = await client.register_transaction(
             session_id="order-001",
@@ -63,85 +94,34 @@ async def main():
             currency="PLN",
             description="Order #001",
             email="buyer@example.com",
-            url_return="https://shop.example.com/return/order-001",
-            url_status="https://shop.example.com/callback/order-001",
+            url_return="https://shop.example.com/return/",
+            url_status="https://shop.example.com/callback/",
         )
         token = response["data"]["token"]
-        redirect_url = client.get_transaction_redirect_url(token)
-        print(f"Redirect buyer to: {redirect_url}")
+        print(f"Redirect URL: {client.get_transaction_redirect_url(token)}")
 
-anyio.run(main)
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
-
-### With django-getpaid
-
-Register the plugin via entry point in `pyproject.toml`:
-
-```toml
-[project.entry-points."getpaid.backends"]
-przelewy24 = "getpaid_przelewy24.processor:P24Processor"
-```
-
-Then configure in your Django settings (or config dict):
-
-```python
-GETPAID_BACKEND_SETTINGS = {
-    "przelewy24": {
-        "merchant_id": 12345,
-        "pos_id": 12345,
-        "api_key": "your-api-key",
-        "crc_key": "your-crc-key",
-        "sandbox": True,
-        "url_status": "https://shop.example.com/payments/{payment_id}/callback/",
-        "url_return": "https://shop.example.com/payments/{payment_id}/return/",
-        "refund_url_status": "https://shop.example.com/payments/{payment_id}/refund-callback/",
-    }
-}
-```
-
-## Configuration Reference
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `merchant_id` | `int` | *required* | Merchant ID from P24 panel |
-| `pos_id` | `int` | *required* | POS ID (often same as merchant_id) |
-| `api_key` | `str` | *required* | REST API key from P24 panel |
-| `crc_key` | `str` | *required* | CRC key for signature calculation |
-| `sandbox` | `bool` | `True` | Use sandbox (`sandbox.przelewy24.pl`) or production (`secure.przelewy24.pl`) |
-| `url_status` | `str` | `""` | Callback URL template; use `{payment_id}` placeholder |
-| `url_return` | `str` | `""` | Return URL template; use `{payment_id}` placeholder |
-| `refund_url_status` | `str` | `""` | Refund callback URL template; use `{payment_id}` placeholder |
-
-## Supported Currencies
-
-PLN, EUR, GBP, CZK, USD, BGN, DKK, HUF, NOK, SEK, CHF, RON, HRK (13 total).
-
-## Limitations
-
-Przelewy24 does not support pre-authorization. The `charge()` and
-`release_lock()` methods raise `NotImplementedError`.
 
 ## Requirements
 
-- Python 3.12+
-- `python-getpaid-core >= 0.1.0`
+- Python 3.12 or 3.13
+- `python-getpaid-core >= 3.0.0a2`
 - `httpx >= 0.27.0`
-
-## Related Projects
-
-- [python-getpaid-core](https://github.com/django-getpaid/python-getpaid-core) — core abstractions (protocols, FSM, processor base class)
-- [django-getpaid](https://github.com/django-getpaid/django-getpaid) — Django adapter (models, views, admin)
 
 ## License
 
-MIT
+This project is licensed under the MIT License.
 
-## Disclaimer
+## Links
 
-This project has nothing in common with the
-[getpaid](http://code.google.com/p/getpaid/) plone project.
-It is part of the `django-getpaid` / `python-getpaid` ecosystem.
+- [python-getpaid-core](https://github.com/django-getpaid/python-getpaid-core)
+- [django-getpaid](https://github.com/django-getpaid/django-getpaid)
+- [litestar-getpaid](https://github.com/django-getpaid/litestar-getpaid)
+- [fastapi-getpaid](https://github.com/django-getpaid/fastapi-getpaid)
+- [Przelewy24 API Documentation](https://developers.przelewy24.pl/)
 
-## Credits
-
+---
 Created by [Dominik Kozaczko](https://github.com/dekoza).
+Part of the `python-getpaid` ecosystem.
