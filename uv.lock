@@ -587,7 +587,6 @@ wheels = [
 
 [[package]]
 name = "python-getpaid-przelewy24"
-version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

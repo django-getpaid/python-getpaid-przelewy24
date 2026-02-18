@@ -3,6 +3,8 @@
 # Lazy imports — client and processor are defined in later tasks.
 # This avoids ImportError when only types.py is implemented so far.
 
+__version__ = "0.1.2"
+
 __all__ = [
     "P24Client",
     "P24Processor",

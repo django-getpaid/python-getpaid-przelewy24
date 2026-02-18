@@ -1,6 +1,6 @@
 [project]
 name = 'python-getpaid-przelewy24'
-version = "0.1.2"
+dynamic = ["version"]
 description = 'Przelewy24 payment gateway integration for python-getpaid ecosystem.'
 readme = 'README.md'
 license = {text = 'MIT'}
@@ -51,6 +51,9 @@ build-backend = 'hatchling.build'
 
 [tool.hatch.build.targets.wheel]
 packages = ['src/getpaid_przelewy24']
+
+[tool.hatch.version]
+path = "src/getpaid_przelewy24/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ['tests']
