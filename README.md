@@ -19,7 +19,7 @@ This package provides a clean, async-first integration with the Przelewy24 REST 
 - **Sandbox Support**: Easy switching between Sandbox and Production environments.
 - **Payment Status Polling**: Support for the PULL flow to check transaction status via API.
 - **Refunds**: Full support for processing refunds through the Przelewy24 API.
-- **FSM Integration**: Seamlessly integrates with the `python-getpaid-core` finite state machine for robust payment state management.
+- **Semantic Updates**: Integrates with `python-getpaid-core` semantic payment updates for robust payment state management.
 
 ## Installation
 

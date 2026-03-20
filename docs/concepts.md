@@ -24,7 +24,7 @@ The Przelewy24 payment flow follows a register-redirect-verify pattern:
 │  Your    │
 │  Server  │  1. verify_callback (check SHA-384 sign)
 │          │  2. handle_callback (call verify_transaction)
-│          │  3. FSM: confirm_payment → mark_as_paid
+│          │  3. return `payment_captured` update
 └──────────┘
 ```
 
@@ -47,8 +47,8 @@ The Przelewy24 payment flow follows a register-redirect-verify pattern:
 5. **Handle callback** — `P24Processor.handle_callback()` calls
    `P24Client.verify_transaction()` to confirm the payment with P24.
 
-6. **FSM update** — on successful verification, the payment transitions
-   through `confirm_payment` → `mark_as_paid`.
+6. **Semantic update** — on successful verification, the processor returns a
+   `payment_captured` update.
 
 :::{warning}
 The `verify_transaction` call in step 5 is **mandatory**. Without it,
@@ -121,14 +121,14 @@ The plugin supports both notification models:
 
 - **PULL** — `P24Processor.fetch_payment_status()` calls
   `P24Client.get_transaction_by_session_id()` to poll the transaction status.
-  Returns a `PaymentStatusResponse` with the mapped status.
+  Returns a semantic `PaymentUpdate`.
 
-| P24 Status | Value | Mapped FSM Trigger |
-|------------|-------|--------------------|
+| P24 Status | Value | Semantic Event |
+|------------|-------|----------------|
 | `NO_PAYMENT` | 0 | `None` |
-| `ADVANCE_PAYMENT` | 1 | `confirm_prepared` |
-| `PAYMENT_MADE` | 2 | `confirm_payment` |
-| `PAYMENT_RETURNED` | 3 | `confirm_refund` |
+| `ADVANCE_PAYMENT` | 1 | `prepared` |
+| `PAYMENT_MADE` | 2 | `payment_captured` |
+| `PAYMENT_RETURNED` | 3 | `refund_confirmed` |
 
 ## Supported Operations
 

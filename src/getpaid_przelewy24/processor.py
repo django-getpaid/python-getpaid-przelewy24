@@ -1,18 +1,19 @@
 """Przelewy24 payment processor."""
 
-import contextlib
 import hmac as hmac_mod
 import logging
 import uuid
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import ClassVar
 
+from getpaid_core.enums import PaymentEvent
 from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.processor import BaseProcessor
 from getpaid_core.types import ChargeResponse
-from getpaid_core.types import PaymentStatusResponse
+from getpaid_core.types import PaymentUpdate
+from getpaid_core.types import RefundResult
 from getpaid_core.types import TransactionResult
-from transitions.core import MachineError
 
 from .client import P24Client
 from .types import Currency
@@ -33,17 +34,17 @@ class P24Processor(BaseProcessor):
 
     slug: ClassVar[str] = "przelewy24"
     display_name: ClassVar[str] = "Przelewy24"
-    accepted_currencies: ClassVar[list[str]] = [c.value for c in Currency]
+    accepted_currencies: ClassVar[Sequence[str]] = [c.value for c in Currency]
     sandbox_url: ClassVar[str] = "https://sandbox.przelewy24.pl"
     production_url: ClassVar[str] = "https://secure.przelewy24.pl"
 
     def _get_client(self) -> P24Client:
         """Create a P24Client from processor config."""
         return P24Client(
-            merchant_id=self.get_setting("merchant_id"),
-            pos_id=self.get_setting("pos_id"),
-            api_key=self.get_setting("api_key"),
-            crc_key=self.get_setting("crc_key"),
+            merchant_id=int(self.get_setting("merchant_id", 0)),
+            pos_id=int(self.get_setting("pos_id", 0)),
+            api_key=str(self.get_setting("api_key", "")),
+            crc_key=str(self.get_setting("crc_key", "")),
             sandbox=self.get_setting("sandbox", True),
         )
 
@@ -84,10 +85,9 @@ class P24Processor(BaseProcessor):
         token = response.get("data", {}).get("token", "")
         redirect_url = client.get_transaction_redirect_url(token)
         return TransactionResult(
-            redirect_url=redirect_url,
-            form_data=None,
             method="GET",
-            headers={},
+            redirect_url=redirect_url,
+            provider_data={"p24_token": token},
         )
 
     async def verify_callback(
@@ -155,25 +155,12 @@ class P24Processor(BaseProcessor):
 
     async def handle_callback(
         self, data: dict, headers: dict, **kwargs
-    ) -> None:
-        """Handle P24 notification and verify the transaction.
-
-        After receiving a notification from P24, this method:
-        1. Extracts orderId from the notification
-        2. Stores orderId as external_id on the payment
-        3. Calls verify_transaction to confirm the payment
-        4. Updates FSM state based on verification result
-
-        The verify step is MANDATORY — without it, P24 treats
-        the payment as an advance payment only.
-        """
+    ) -> PaymentUpdate:
+        """Handle P24 notification and return a semantic update."""
         order_id: int = data.get("orderId", 0)
         session_id: str = data.get("sessionId", self.payment.id)
         amount: int = data.get("amount", 0)
         currency: str = data.get("currency", self.payment.currency)
-
-        if order_id:
-            self.payment.external_id = str(order_id)
 
         client = self._get_client()
         amount_decimal = P24Client._from_lowest_unit(amount)
@@ -185,19 +172,19 @@ class P24Processor(BaseProcessor):
             currency=currency,
         )
 
-        # Verification succeeded — move to paid
-        if self.payment.may_trigger("confirm_payment"):
-            self.payment.confirm_payment()
-            with contextlib.suppress(MachineError):
-                self.payment.mark_as_paid()
-        else:
-            logger.debug(
-                "Cannot confirm payment %s (status: %s)",
-                self.payment.id,
-                self.payment.status,
-            )
+        return PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=amount_decimal,
+            external_id=str(order_id) if order_id else self.payment.external_id,
+            provider_event_id=(
+                f"{session_id}:{order_id}:{amount}:{currency}"
+                if order_id
+                else None
+            ),
+            provider_data={"p24_verified": True},
+        )
 
-    async def fetch_payment_status(self, **kwargs) -> PaymentStatusResponse:
+    async def fetch_payment_status(self, **kwargs) -> PaymentUpdate | None:
         """PULL flow: fetch transaction status from P24 API."""
         client = self._get_client()
         response = await client.get_transaction_by_session_id(
@@ -205,17 +192,24 @@ class P24Processor(BaseProcessor):
         )
         tx_data = response.get("data", {})
         status = tx_data.get("status")
+        amount = tx_data.get("amount")
+        provider_event_id = f"poll:{self.payment.id}:{status}"
 
-        status_map = {
-            TransactionStatus.NO_PAYMENT: None,
-            TransactionStatus.ADVANCE_PAYMENT: "confirm_prepared",
-            TransactionStatus.PAYMENT_MADE: "confirm_payment",
-            TransactionStatus.PAYMENT_RETURNED: "confirm_refund",
-        }
-
-        return PaymentStatusResponse(
-            status=status_map.get(status),
-        )
+        if status == TransactionStatus.PAYMENT_MADE:
+            return PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=P24Client._from_lowest_unit(amount or 0),
+                provider_event_id=provider_event_id,
+                provider_data={"p24_status": status},
+            )
+        if status == TransactionStatus.PAYMENT_RETURNED:
+            return PaymentUpdate(
+                payment_event=PaymentEvent.REFUND_CONFIRMED,
+                refunded_amount=P24Client._from_lowest_unit(amount or 0),
+                provider_event_id=provider_event_id,
+                provider_data={"p24_status": status},
+            )
+        return None
 
     async def charge(
         self, amount: Decimal | None = None, **kwargs
@@ -233,7 +227,7 @@ class P24Processor(BaseProcessor):
 
     async def start_refund(
         self, amount: Decimal | None = None, **kwargs
-    ) -> Decimal:
+    ) -> RefundResult:
         """Start a refund via P24 API."""
         client = self._get_client()
         refund_amount = amount or self.payment.amount_paid
@@ -246,9 +240,11 @@ class P24Processor(BaseProcessor):
         if refund_url_status:
             refund_url_status = self._resolve_url(refund_url_status)
 
+        request_id = str(uuid.uuid4())
+        refunds_uuid = str(uuid.uuid4())
         await client.refund(
-            request_id=str(uuid.uuid4()),
-            refunds_uuid=str(uuid.uuid4()),
+            request_id=request_id,
+            refunds_uuid=refunds_uuid,
             url_status=refund_url_status,
             refunds=[
                 {
@@ -258,4 +254,10 @@ class P24Processor(BaseProcessor):
                 }
             ],
         )
-        return refund_amount
+        return RefundResult(
+            amount=refund_amount,
+            provider_data={
+                "request_id": request_id,
+                "refunds_uuid": refunds_uuid,
+            },
+        )
