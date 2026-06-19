@@ -107,7 +107,7 @@ if __name__ == "__main__":
 ## Requirements
 
 - Python 3.12 or 3.13
-- `python-getpaid-core >= 3.0.0a4`
+- `python-getpaid-core >= 3.0.0`
 - `httpx >= 0.27.0`
 
 ## License

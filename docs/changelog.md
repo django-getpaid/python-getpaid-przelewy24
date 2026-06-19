@@ -1,21 +1,30 @@
 # Changelog
 
-## v0.1.0 (2026-02-14)
+## v3.0.0 (2026-06-04)
 
-Initial release.
+Stable release of the Przelewy24 payment gateway integration.
+
+### Breaking Changes
+
+- Version bumped from `3.0.0a4` to `3.0.0` (stable).
+- Development status changed from `Alpha` to `Production/Stable`.
+- Core dependency floor raised to `>=3.0.0` (from `>=3.0.0a4`).
 
 ### Features
 
-- Full Przelewy24 REST API coverage
-- Async HTTP client (`P24Client`) with HTTP Basic Auth
-- Payment processor (`P24Processor`) implementing `BaseProcessor`
-- Transaction registration and verification
-- SHA-384 signature calculation and verification
-- Batch refund support
-- Transaction lookup by session ID
-- Refund lookup by order ID
-- Payment methods retrieval
-- Connection testing (`testAccess`)
-- PUSH callback handling with mandatory verify step
-- PULL status polling
-- Amount conversion (`Decimal` <-> integer lowest currency unit)
+- Full Przelewy24 REST API v1.1 coverage with async HTTP client.
+- SHA-384 signature calculation and verification for notifications.
+- Transaction registration and verification flow.
+- Batch refund support.
+- Transaction lookup by session ID.
+- Refund lookup by order ID.
+- Payment methods retrieval.
+- Connection testing (`testAccess`).
+- PUSH callback handling with mandatory verify step.
+- PULL status polling.
+- Support for 13 currencies: PLN, EUR, GBP, USD, CZK, BGN, DKK, HUF, NOK, SEK, CHF, RON, HRK.
+
+### Migration from alpha
+
+- Update dependency from `python-getpaid-przelewy24>=3.0.0a4` to `python-getpaid-przelewy24>=3.0.0`.
+- No API changes — all public interfaces remain stable.

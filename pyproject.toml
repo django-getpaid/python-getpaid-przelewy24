@@ -9,7 +9,7 @@ authors = [
 ]
 requires-python = '>=3.12'
 classifiers = [
-    'Development Status :: 3 - Alpha',
+    'Development Status :: 5 - Production/Stable',
     'Intended Audience :: Developers',
     'License :: OSI Approved :: MIT License',
     'Programming Language :: Python :: 3.12',
@@ -19,7 +19,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
-    'python-getpaid-core>=3.0.0a4',
+    'python-getpaid-core>=3.0.0',
     'httpx>=0.27.0',
 ]
 
@@ -41,6 +41,7 @@ dev = [
 [project.urls]
 Homepage = 'https://github.com/django-getpaid/python-getpaid-przelewy24'
 Repository = 'https://github.com/django-getpaid/python-getpaid-przelewy24'
+Documentation = 'https://python-getpaid-przelewy24.readthedocs.io'
 Changelog = 'https://github.com/django-getpaid/python-getpaid-przelewy24/releases'
 
 [project.entry-points."getpaid.backends"]
