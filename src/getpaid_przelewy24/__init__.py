@@ -8,4 +8,4 @@ __all__ = [
     "P24Processor",
 ]
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
