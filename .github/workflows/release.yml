@@ -1,19 +1,23 @@
 name: Release
 
+# Only release after the CI workflow has completed successfully on
+# main — never publish a package that failed lint/type/test checks.
 on:
-  push:
-    branches:
-      - main
-      - master
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0  # Full history needed for version detection
 
       - name: Set up Python

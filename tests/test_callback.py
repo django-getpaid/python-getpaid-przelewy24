@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 
 import pytest
 from getpaid_core.enums import PaymentEvent
@@ -78,8 +79,86 @@ class TestVerifyCallback:
         data = _notification_data()
         data["sign"] = "bad_signature"
 
-        with pytest.raises(InvalidCallbackError, match="BAD SIGNATURE"):
+        with pytest.raises(InvalidCallbackError, match=r"Invalid signature"):
             await processor.verify_callback(data=data, headers={})
+
+    async def test_bad_signature_does_not_leak_expected_sign(self, caplog):
+        """Neither exception nor logs may disclose the expected sign
+        (signature oracle)."""
+        processor = _make_processor()
+        data = _notification_data()
+        expected_sign = data["sign"]  # correct sign for these fields
+        data["sign"] = "bad_signature"
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(InvalidCallbackError) as excinfo,
+        ):
+            await processor.verify_callback(data=data, headers={})
+
+        assert expected_sign not in str(excinfo.value)
+        for record in caplog.records:
+            assert expected_sign not in record.getMessage()
+
+
+class TestCallbackBinding:
+    """The notification must be bound to OUR payment — a valid
+    signature over attacker-chosen fields is not enough."""
+
+    async def test_verify_rejects_foreign_session_id(self):
+        processor = _make_processor()
+        data = _notification_data(session_id="someone-elses-payment")
+
+        with pytest.raises(InvalidCallbackError, match="sessionId"):
+            await processor.verify_callback(data=data, headers={})
+
+    async def test_verify_rejects_wrong_amount(self):
+        processor = _make_processor()
+        # Payment requires 100.00 PLN == 10000; attacker posts 1 grosz.
+        data = _notification_data(amount=1)
+
+        with pytest.raises(InvalidCallbackError, match="amount"):
+            await processor.verify_callback(data=data, headers={})
+
+    async def test_verify_rejects_wrong_currency(self):
+        processor = _make_processor()
+        data = _notification_data(currency="HUF")
+
+        with pytest.raises(InvalidCallbackError, match="currency"):
+            await processor.verify_callback(data=data, headers={})
+
+    async def test_handle_rejects_mismatch_without_calling_verify(
+        self, respx_mock
+    ):
+        route = respx_mock.put(VERIFY_URL).respond(
+            json={"data": {"status": "success"}},
+            status_code=200,
+        )
+        processor = _make_processor()
+        data = _notification_data(amount=1, origin_amount=1)
+
+        with pytest.raises(InvalidCallbackError):
+            await processor.handle_callback(data=data, headers={})
+
+        assert not route.called
+
+    async def test_handle_verifies_with_our_payment_values(self, respx_mock):
+        route = respx_mock.put(VERIFY_URL).respond(
+            json={"data": {"status": "success"}},
+            status_code=200,
+        )
+        processor = _make_processor()
+
+        await processor.handle_callback(
+            data=_notification_data(),
+            headers={},
+        )
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["sessionId"] == "test-payment-123"
+        assert body["amount"] == 10000
+        assert body["currency"] == "PLN"
+        assert body["orderId"] == 999
 
 
 class TestHandleCallback:

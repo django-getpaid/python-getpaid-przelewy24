@@ -9,8 +9,9 @@ from typing import ClassVar
 
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.exceptions import InvalidCallbackError
+from getpaid_core.exceptions import RefundFailure
 from getpaid_core.processor import BaseProcessor
-from getpaid_core.types import ChargeResponse
+from getpaid_core.types import ChargeResult
 from getpaid_core.types import PaymentUpdate
 from getpaid_core.types import RefundResult
 from getpaid_core.types import TransactionResult
@@ -90,14 +91,47 @@ class P24Processor(BaseProcessor):
             provider_data={"p24_token": token},
         )
 
+    def _validate_notification_binding(self, data: dict) -> None:
+        """Ensure the notification is bound to THIS payment.
+
+        A valid signature only proves the payload came from P24 —
+        it does not prove it belongs to this payment. Reject
+        notifications whose sessionId, amount or currency do not
+        match our payment record.
+        """
+        session_id = str(data.get("sessionId", ""))
+        if session_id != str(self.payment.id):
+            raise InvalidCallbackError(
+                "Notification sessionId does not match payment"
+            )
+        expected_amount = P24Client._to_lowest_unit(
+            self.payment.amount_required,
+            self.payment.currency,
+        )
+        try:
+            received_amount = int(data.get("amount", 0))
+        except (TypeError, ValueError) as exc:
+            raise InvalidCallbackError(
+                "Notification amount is not a valid integer"
+            ) from exc
+        if received_amount != expected_amount:
+            raise InvalidCallbackError(
+                "Notification amount does not match payment"
+            )
+        if str(data.get("currency", "")) != str(self.payment.currency):
+            raise InvalidCallbackError(
+                "Notification currency does not match payment"
+            )
+
     async def verify_callback(
         self, data: dict, headers: dict, **kwargs
     ) -> None:
-        """Verify P24 notification signature.
+        """Verify P24 notification signature and payment binding.
 
         Expects data to contain the notification fields including
         'sign'. Computes the expected sign from the notification
-        fields + CRC key and compares.
+        fields + CRC key and compares, then cross-checks the
+        notification against this payment.
         """
         client = self._get_client()
         required_fields = [
@@ -141,29 +175,38 @@ class P24Processor(BaseProcessor):
             )
 
         if not hmac_mod.compare_digest(expected_sign, received_sign):
+            # Never log or expose the expected sign — that would act
+            # as a signature oracle for attackers.
             logger.error(
-                "P24 notification bad signature for payment %s! "
-                "Got '%s', expected '%s'",
+                "P24 notification bad signature for payment %s! Got '%s'",
                 self.payment.id,
                 received_sign,
-                expected_sign,
             )
             raise InvalidCallbackError(
-                f"BAD SIGNATURE: got '{received_sign}', "
-                f"expected '{expected_sign}'"
+                f"Invalid signature: got '{received_sign}'"
             )
+
+        self._validate_notification_binding(data)
 
     async def handle_callback(
         self, data: dict, headers: dict, **kwargs
     ) -> PaymentUpdate:
-        """Handle P24 notification and return a semantic update."""
-        order_id: int = data.get("orderId", 0)
-        session_id: str = data.get("sessionId", self.payment.id)
-        amount: int = data.get("amount", 0)
-        currency: str = data.get("currency", self.payment.currency)
+        """Handle P24 notification and return a semantic update.
+
+        The verify call is made with OUR payment's sessionId, amount
+        and currency — never with attacker-postable payload values.
+        Only orderId is taken from the payload (it is assigned by
+        P24 and cross-signed in verify_callback).
+        """
+        self._validate_notification_binding(data)
+
+        order_id: int = int(data.get("orderId", 0))
+        session_id: str = str(self.payment.id)
+        amount_decimal: Decimal = self.payment.amount_required
+        currency: str = str(self.payment.currency)
 
         client = self._get_client()
-        amount_decimal = P24Client._from_lowest_unit(amount)
+        amount = P24Client._to_lowest_unit(amount_decimal, currency)
 
         await client.verify_transaction(
             session_id=session_id,
@@ -198,14 +241,20 @@ class P24Processor(BaseProcessor):
         if status == TransactionStatus.PAYMENT_MADE:
             return PaymentUpdate(
                 payment_event=PaymentEvent.PAYMENT_CAPTURED,
-                paid_amount=P24Client._from_lowest_unit(amount or 0),
+                paid_amount=P24Client._from_lowest_unit(
+                    amount or 0,
+                    self.payment.currency,
+                ),
                 provider_event_id=provider_event_id,
                 provider_data={"p24_status": status},
             )
         if status == TransactionStatus.PAYMENT_RETURNED:
             return PaymentUpdate(
                 payment_event=PaymentEvent.REFUND_CONFIRMED,
-                refunded_amount=P24Client._from_lowest_unit(amount or 0),
+                refunded_amount=P24Client._from_lowest_unit(
+                    amount or 0,
+                    self.payment.currency,
+                ),
                 provider_event_id=provider_event_id,
                 provider_data={"p24_status": status},
             )
@@ -213,7 +262,7 @@ class P24Processor(BaseProcessor):
 
     async def charge(
         self, amount: Decimal | None = None, **kwargs
-    ) -> ChargeResponse:
+    ) -> ChargeResult:
         """Not supported by P24 (no pre-auth flow)."""
         raise NotImplementedError(
             "Przelewy24 does not support pre-authorization/charge flow"
@@ -229,9 +278,18 @@ class P24Processor(BaseProcessor):
         self, amount: Decimal | None = None, **kwargs
     ) -> RefundResult:
         """Start a refund via P24 API."""
+        if not self.payment.external_id:
+            raise RefundFailure(
+                "Cannot start refund: payment has no external_id "
+                "(P24 orderId). The payment was probably never "
+                "captured."
+            )
         client = self._get_client()
         refund_amount = amount or self.payment.amount_paid
-        amount_int = P24Client._to_lowest_unit(refund_amount)
+        amount_int = P24Client._to_lowest_unit(
+            refund_amount,
+            self.payment.currency,
+        )
 
         refund_url_status = self.get_setting(
             "refund_url_status",

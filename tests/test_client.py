@@ -124,8 +124,27 @@ class TestAmountConversion:
     def test_to_lowest_unit_small(self):
         assert P24Client._to_lowest_unit(Decimal("0.01")) == 1
 
+    def test_to_lowest_unit_rounds_half_up(self):
+        """10.005 must round to 1001, not truncate to 1000."""
+        assert P24Client._to_lowest_unit(Decimal("10.005")) == 1001
+
+    def test_to_lowest_unit_no_float_truncation(self):
+        """19.99 stored as float is 19.9899...; int(a*100) gave 1998."""
+        assert P24Client._to_lowest_unit(Decimal("19.99")) == 1999
+
+    def test_to_lowest_unit_accepts_float_input(self):
+        assert P24Client._to_lowest_unit(19.99) == 1999
+        assert P24Client._to_lowest_unit(10.005) == 1001
+
+    def test_to_lowest_unit_with_explicit_currency(self):
+        assert P24Client._to_lowest_unit(Decimal("1.23"), "PLN") == 123
+        assert P24Client._to_lowest_unit(Decimal("1.23"), "EUR") == 123
+
     def test_from_lowest_unit(self):
         assert P24Client._from_lowest_unit(123) == Decimal("1.23")
+
+    def test_from_lowest_unit_with_currency(self):
+        assert P24Client._from_lowest_unit(123, "PLN") == Decimal("1.23")
 
     def test_from_lowest_unit_large(self):
         assert P24Client._from_lowest_unit(10000) == Decimal("100.00")
@@ -393,6 +412,79 @@ class TestRefund:
             )
 
 
+class TestErrorContextSanitization:
+    """Exception context must never carry the raw httpx.Response —
+    its request headers contain the Basic-auth Authorization header."""
+
+    @staticmethod
+    def _assert_sanitized(context: dict) -> None:
+        import httpx
+
+        assert not any(
+            isinstance(value, httpx.Response) for value in context.values()
+        )
+        response = context["response"]
+        assert isinstance(response, dict)
+        assert "status_code" in response
+        assert "body" in response
+        dumped = repr(context)
+        assert "Authorization" not in dumped
+        assert "Basic " not in dumped
+
+    async def test_register_failure_context_has_no_credentials(
+        self, respx_mock
+    ):
+        respx_mock.post(REGISTER_URL).respond(
+            json={"error": "Invalid data"}, status_code=400
+        )
+        client = _make_client()
+        with pytest.raises(LockFailure) as excinfo:
+            await client.register_transaction(
+                session_id="sess-1",
+                amount=Decimal("10.00"),
+                currency="PLN",
+                description="Test",
+                email="test@example.com",
+                url_return="https://shop.example.com/return",
+                url_status="https://shop.example.com/callback",
+            )
+        self._assert_sanitized(excinfo.value.context)
+        assert excinfo.value.context["response"]["status_code"] == 400
+
+    async def test_verify_failure_context_has_no_credentials(self, respx_mock):
+        respx_mock.put(VERIFY_URL).respond(
+            json={"error": "nope"}, status_code=400
+        )
+        client = _make_client()
+        with pytest.raises(CommunicationError) as excinfo:
+            await client.verify_transaction(
+                session_id="sess-1",
+                order_id=999,
+                amount=Decimal("10.00"),
+                currency="PLN",
+            )
+        self._assert_sanitized(excinfo.value.context)
+
+    async def test_test_access_failure_context_has_no_credentials(
+        self, respx_mock
+    ):
+        respx_mock.get(TEST_ACCESS_URL).respond(status_code=401)
+        client = _make_client()
+        with pytest.raises(CredentialsError) as excinfo:
+            await client.test_access()
+        self._assert_sanitized(excinfo.value.context)
+
+    async def test_long_body_is_truncated(self, respx_mock):
+        respx_mock.get(TEST_ACCESS_URL).respond(
+            status_code=500, text="x" * 100_000
+        )
+        client = _make_client()
+        with pytest.raises(CredentialsError) as excinfo:
+            await client.test_access()
+        body = excinfo.value.context["response"]["body"]
+        assert len(body) <= 2048
+
+
 class TestGetTransactionBySessionId:
     """Tests for get_transaction_by_session_id."""
 
@@ -472,6 +564,91 @@ class TestGetPaymentMethods:
         client = _make_client()
         with pytest.raises(CommunicationError):
             await client.get_payment_methods("pl")
+
+
+class TestTimeouts:
+    """The client must use explicit, configurable HTTP timeouts."""
+
+    async def test_default_timeout(self):
+        import httpx
+
+        client = _make_client()
+        assert client.timeout == httpx.Timeout(10.0, connect=5.0)
+        async with client:
+            assert client._client.timeout == httpx.Timeout(10.0, connect=5.0)
+
+    async def test_custom_timeout(self):
+        import httpx
+
+        custom = httpx.Timeout(2.0, connect=1.0)
+        client = P24Client(
+            merchant_id=1,
+            pos_id=1,
+            api_key="k",
+            crc_key="c",
+            timeout=custom,
+        )
+        assert client.timeout == custom
+        async with client:
+            assert client._client.timeout == custom
+
+
+class TestVerifyRetry:
+    """verify_transaction is idempotent and mandatory for funds
+    settlement — transient transport failures are retried."""
+
+    def _client(self) -> P24Client:
+        client = _make_client()
+        client.retry_backoff = 0  # no sleeping in tests
+        return client
+
+    async def test_retries_after_transient_failure(self, respx_mock):
+        import httpx
+
+        route = respx_mock.put(VERIFY_URL)
+        route.side_effect = [
+            httpx.ConnectError("boom"),
+            httpx.Response(200, json={"data": {"status": "success"}}),
+        ]
+        result = await self._client().verify_transaction(
+            session_id="sess-1",
+            order_id=999,
+            amount=Decimal("10.00"),
+            currency="PLN",
+        )
+        assert result["data"]["status"] == "success"
+        assert route.call_count == 2
+
+    async def test_gives_up_after_two_retries(self, respx_mock):
+        import httpx
+
+        route = respx_mock.put(VERIFY_URL)
+        route.side_effect = httpx.ConnectError("boom")
+        with pytest.raises(CommunicationError):
+            await self._client().verify_transaction(
+                session_id="sess-1",
+                order_id=999,
+                amount=Decimal("10.00"),
+                currency="PLN",
+            )
+        assert route.call_count == 3  # initial attempt + 2 retries
+
+    async def test_register_does_not_retry(self, respx_mock):
+        import httpx
+
+        route = respx_mock.post(REGISTER_URL)
+        route.side_effect = httpx.ConnectError("boom")
+        with pytest.raises(httpx.ConnectError):
+            await self._client().register_transaction(
+                session_id="sess-1",
+                amount=Decimal("10.00"),
+                currency="PLN",
+                description="Test",
+                email="test@example.com",
+                url_return="https://shop.example.com/return",
+                url_status="https://shop.example.com/callback",
+            )
+        assert route.call_count == 1
 
 
 class TestAsyncContextManager:

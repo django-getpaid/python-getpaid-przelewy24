@@ -1,6 +1,7 @@
 """Przelewy24 API types and enums."""
 
 from enum import IntEnum
+from enum import StrEnum
 from enum import auto
 from enum import unique
 from typing import TypedDict
@@ -24,7 +25,7 @@ class Currency(AutoName):
     SEK = auto()
     CHF = auto()
     RON = auto()
-    HRK = auto()
+    # HRK removed: Croatia switched to EUR on 2023-01-01.
 
 
 @unique

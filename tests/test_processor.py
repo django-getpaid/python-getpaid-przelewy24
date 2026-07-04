@@ -7,6 +7,7 @@ import pytest
 from getpaid_core.enums import BackendMethod
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.exceptions import LockFailure
+from getpaid_core.exceptions import RefundFailure
 
 from getpaid_przelewy24.processor import P24Processor
 
@@ -157,3 +158,15 @@ class TestRefunds:
         result = await _make_processor(payment=payment).start_refund()
 
         assert result.amount == Decimal("100.00")
+
+    async def test_start_refund_without_external_id_raises(self, respx_mock):
+        """A payment that was never captured has no P24 orderId —
+        refuse with a domain error instead of TypeError."""
+        route = respx_mock.post(REFUND_URL)
+        payment = make_mock_payment(external_id=None)
+        payment.amount_paid = Decimal("100.00")
+
+        with pytest.raises(RefundFailure, match="external_id"):
+            await _make_processor(payment=payment).start_refund()
+
+        assert not route.called

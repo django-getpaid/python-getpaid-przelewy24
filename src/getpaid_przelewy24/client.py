@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+from decimal import ROUND_HALF_UP
 from decimal import Decimal
 
+import anyio
 import httpx
 from getpaid_core.exceptions import CommunicationError
 from getpaid_core.exceptions import CredentialsError
@@ -17,6 +19,46 @@ from .types import VerifyResponse
 SANDBOX_URL = "https://sandbox.przelewy24.pl"
 PRODUCTION_URL = "https://secure.przelewy24.pl"
 
+# P24 expresses amounts in the lowest currency unit. All currencies
+# currently supported by P24 have an ISO 4217 exponent of 2
+# (amount x 100), but the mapping is explicit so a future currency
+# with a different exponent cannot be silently mis-scaled.
+CURRENCY_EXPONENTS: dict[str, int] = {
+    "PLN": 2,
+    "EUR": 2,
+    "GBP": 2,
+    "CZK": 2,
+    "USD": 2,
+    "BGN": 2,
+    "DKK": 2,
+    "HUF": 2,
+    "NOK": 2,
+    "SEK": 2,
+    "CHF": 2,
+    "RON": 2,
+}
+DEFAULT_CURRENCY_EXPONENT = 2
+
+MAX_ERROR_BODY_LENGTH = 2048
+
+DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+#: Retries for the (idempotent, settlement-critical) verify call.
+VERIFY_RETRIES = 2
+
+
+def _sanitize_response(response: httpx.Response) -> dict:
+    """Build a safe error-context dict from an httpx.Response.
+
+    The raw Response must never be attached to exceptions: its
+    ``request.headers`` carry the Basic-auth Authorization header,
+    which would leak credentials into logs and error trackers.
+    """
+    return {
+        "status_code": response.status_code,
+        "body": response.text[:MAX_ERROR_BODY_LENGTH],
+    }
+
 
 class P24Client:
     """Async client for Przelewy24 REST API.
@@ -29,8 +71,6 @@ class P24Client:
             await client.register_transaction(...)
     """
 
-    last_response: httpx.Response | None = None
-
     def __init__(
         self,
         *,
@@ -39,18 +79,27 @@ class P24Client:
         api_key: str,
         crc_key: str,
         sandbox: bool = True,
+        timeout: httpx.Timeout | float | None = None,
     ) -> None:
         self.merchant_id = merchant_id
         self.pos_id = pos_id
         self.api_key = api_key
         self.crc_key = crc_key
         self.base_url = SANDBOX_URL if sandbox else PRODUCTION_URL
+        self.timeout: httpx.Timeout | float = (
+            DEFAULT_TIMEOUT if timeout is None else timeout
+        )
+        self.retry_backoff: float = 0.5
+        # Instance attribute — a class-level Response would be shared
+        # (and leak) across all client instances.
+        self.last_response: httpx.Response | None = None
         self._client: httpx.AsyncClient | None = None
         self._owns_client: bool = False
 
     async def __aenter__(self) -> "P24Client":
         self._client = httpx.AsyncClient(
             auth=(str(self.pos_id), self.api_key),
+            timeout=self.timeout,
         )
         self._owns_client = True
         return self
@@ -88,6 +137,7 @@ class P24Client:
             )
         async with httpx.AsyncClient(
             auth=self._get_auth(),
+            timeout=self.timeout,
         ) as client:
             return await client.request(
                 method,
@@ -108,15 +158,40 @@ class P24Client:
         return hashlib.sha384(data.encode()).hexdigest()
 
     @staticmethod
-    def _to_lowest_unit(amount: Decimal) -> int:
-        """Convert a Decimal amount to integer lowest currency
-        unit."""
-        return int(amount * 100)
+    def _currency_exponent(currency: str | None) -> int:
+        return CURRENCY_EXPONENTS.get(
+            (currency or "").upper(),
+            DEFAULT_CURRENCY_EXPONENT,
+        )
 
     @staticmethod
-    def _from_lowest_unit(amount: int) -> Decimal:
+    def _to_lowest_unit(
+        amount: Decimal | float | str,
+        currency: str | None = None,
+    ) -> int:
+        """Convert an amount to the integer lowest currency unit.
+
+        Uses ``Decimal`` quantization with ROUND_HALF_UP — never
+        binary-float truncation. Floats are converted through
+        ``str()`` so 10.005 means 10.005, not 10.00499...
+        """
+        exponent = P24Client._currency_exponent(currency)
+        if isinstance(amount, float):
+            amount = str(amount)
+        value = Decimal(amount).quantize(
+            Decimal(1).scaleb(-exponent),
+            rounding=ROUND_HALF_UP,
+        )
+        return int(value.scaleb(exponent))
+
+    @staticmethod
+    def _from_lowest_unit(
+        amount: int,
+        currency: str | None = None,
+    ) -> Decimal:
         """Convert integer lowest currency unit to Decimal."""
-        return Decimal(amount) / 100
+        exponent = P24Client._currency_exponent(currency)
+        return Decimal(amount).scaleb(-exponent)
 
     async def test_access(self) -> bool:
         """Test API connection (GET /api/v1/testAccess).
@@ -130,7 +205,7 @@ class P24Client:
             return self.last_response.json().get("data", False)
         raise CredentialsError(
             "Cannot connect to Przelewy24 API.",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(self.last_response)},
         )
 
     async def register_transaction(
@@ -165,7 +240,7 @@ class P24Client:
         :return: Response with token for redirect.
         """
         url = f"{self.base_url}/api/v1/transaction/register"
-        amount_int = self._to_lowest_unit(amount)
+        amount_int = self._to_lowest_unit(amount, currency)
         sign_fields = {
             "sessionId": session_id,
             "merchantId": self.merchant_id,
@@ -207,7 +282,7 @@ class P24Client:
             return self.last_response.json()
         raise LockFailure(
             "Error registering P24 transaction",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(self.last_response)},
         )
 
     async def verify_transaction(
@@ -233,7 +308,7 @@ class P24Client:
         :return: Verification response.
         """
         url = f"{self.base_url}/api/v1/transaction/verify"
-        amount_int = self._to_lowest_unit(amount)
+        amount_int = self._to_lowest_unit(amount, currency)
         sign_fields = {
             "sessionId": session_id,
             "orderId": order_id,
@@ -250,16 +325,33 @@ class P24Client:
             "sign": self._calculate_sign(sign_fields),
         }
         encoded = json.dumps(data, default=str)
-        self.last_response = await self._request(
-            "PUT",
-            url,
-            content=encoded,
-        )
-        if self.last_response.status_code == 200:
-            return self.last_response.json()
+        # Verify is idempotent and mandatory for funds settlement:
+        # retry transient transport failures with backoff before
+        # giving up.
+        attempts = VERIFY_RETRIES + 1
+        response: httpx.Response | None = None
+        for attempt in range(attempts):
+            try:
+                response = await self._request(
+                    "PUT",
+                    url,
+                    content=encoded,
+                )
+                break
+            except httpx.TransportError as exc:
+                if attempt == attempts - 1:
+                    raise CommunicationError(
+                        "Transport error verifying P24 transaction "
+                        f"after {attempts} attempts: {exc}",
+                    ) from exc
+                await anyio.sleep(self.retry_backoff * 2**attempt)
+        assert response is not None  # loop either broke or raised
+        self.last_response = response
+        if response.status_code == 200:
+            return response.json()
         raise CommunicationError(
             "Error verifying P24 transaction",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(response)},
         )
 
     async def refund(
@@ -300,7 +392,7 @@ class P24Client:
             return self.last_response.json()
         raise RefundFailure(
             "Error requesting P24 refund",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(self.last_response)},
         )
 
     async def get_transaction_by_session_id(
@@ -320,7 +412,7 @@ class P24Client:
             return self.last_response.json()
         raise CommunicationError(
             "Error fetching P24 transaction",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(self.last_response)},
         )
 
     async def get_refund_by_order_id(
@@ -340,7 +432,7 @@ class P24Client:
             return self.last_response.json()
         raise CommunicationError(
             "Error fetching P24 refunds",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(self.last_response)},
         )
 
     async def get_payment_methods(
@@ -374,7 +466,7 @@ class P24Client:
             return self.last_response.json()
         raise CommunicationError(
             "Error fetching P24 payment methods",
-            context={"raw_response": self.last_response},
+            context={"response": _sanitize_response(self.last_response)},
         )
 
     def get_transaction_redirect_url(self, token: str) -> str:

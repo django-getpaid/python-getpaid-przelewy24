@@ -3,9 +3,10 @@
 from getpaid_przelewy24.client import P24Client
 from getpaid_przelewy24.processor import P24Processor
 
+
 __all__ = [
     "P24Client",
     "P24Processor",
 ]
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"

@@ -18,8 +18,13 @@ def test_currency_values():
     assert Currency.SEK == "SEK"
     assert Currency.CHF == "CHF"
     assert Currency.RON == "RON"
-    assert Currency.HRK == "HRK"
-    assert len(Currency) == 13
+    assert len(Currency) == 12
+
+
+def test_hrk_removed():
+    """Croatia uses EUR since 2023 — HRK must not be offered."""
+    assert "HRK" not in Currency.__members__
+    assert all(currency.value != "HRK" for currency in Currency)
 
 
 def test_language_values():
